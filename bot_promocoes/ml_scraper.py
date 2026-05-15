@@ -1,15 +1,17 @@
 # ═══════════════════════════════════════════════════════════
-#  ml_scraper.py — v3 com autenticação OAuth ML
+#  ml_scraper.py — v4 via scraping da página de ofertas ML
+#  Não depende de API nem de token — funciona em qualquer IP
 # ═══════════════════════════════════════════════════════════
 
 import requests
 import urllib.parse
 import logging
 import time
-import os
+import json
+import re
 from config import (
-    CATEGORIAS, DESCONTO_MINIMO_PERCENT, PRECO_MINIMO,
-    PRECO_MAXIMO, MAX_PRODUTOS_POR_CATEGORIA, ML_AFILIADO_PARAMS
+    DESCONTO_MINIMO_PERCENT, PRECO_MINIMO, PRECO_MAXIMO,
+    MAX_PRODUTOS_POR_CATEGORIA, ML_AFILIADO_PARAMS
 )
 
 logging.basicConfig(
@@ -19,16 +21,13 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-BASE_URL = "https://api.mercadolibre.com"
-
-# ─── Credenciais ML (via variáveis de ambiente ou config) ───
-ML_APP_ID       = os.environ.get("ML_APP_ID", "")
-ML_CLIENT_SECRET = os.environ.get("ML_CLIENT_SECRET", "")
-
-HEADERS_BASE = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
-    "Accept-Language": "pt-BR,pt;q=0.9",
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 CUPONS_MANUAIS = {
@@ -45,81 +44,26 @@ CUPONS_MANUAIS = {
     "casa":           "CASAML",
 }
 
-_access_token = None
-_token_expiry = 0
-
-# ─── OAuth — pegar token de acesso ──────────────────────────
-
-def obter_access_token() -> str | None:
-    global _access_token, _token_expiry
-
-    if _access_token and time.time() < _token_expiry:
-        return _access_token
-
-    if not ML_APP_ID or not ML_CLIENT_SECRET:
-        log.warning("ML_APP_ID ou ML_CLIENT_SECRET não configurados. Tentando sem auth...")
-        return None
-
-    try:
-        resp = requests.post(
-            "https://api.mercadolibre.com/oauth/token",
-            headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
-            data={
-                "grant_type":    "client_credentials",
-                "client_id":     ML_APP_ID,
-                "client_secret": ML_CLIENT_SECRET,
-            },
-            timeout=15,
-        )
-
-        if resp.status_code == 200:
-            dados = resp.json()
-            _access_token = dados.get("access_token")
-            _token_expiry = time.time() + dados.get("expires_in", 21600) - 300
-            log.info("✅ Token ML obtido com sucesso")
-            return _access_token
-        else:
-            log.error(f"Erro ao obter token ML: {resp.status_code} — {resp.text[:200]}")
-            return None
-
-    except Exception as e:
-        log.error(f"Falha ao autenticar no ML: {e}")
-        return None
-
-# ─── Sessão autenticada ──────────────────────────────────────
-
-def criar_sessao() -> requests.Session:
-    sessao = requests.Session()
-    sessao.headers.update(HEADERS_BASE)
-
-    token = obter_access_token()
-    if token:
-        sessao.headers["Authorization"] = f"Bearer {token}"
-
-    return sessao
-
-# ─── Link de afiliado ────────────────────────────────────────
+# ─── URLs de busca por categoria (página pública ML) ────────
+URLS_CATEGORIAS = {
+    "💊 Suplementos":       "https://lista.mercadolivre.com.br/suplementos-alimentares#deal_print_id=&pricing_filter=yes",
+    "👗 Moda Feminina":     "https://lista.mercadolivre.com.br/roupa-feminina#deal_print_id=&pricing_filter=yes",
+    "👔 Moda Masculina":    "https://lista.mercadolivre.com.br/roupa-masculina#deal_print_id=&pricing_filter=yes",
+    "📱 Smartphones":       "https://lista.mercadolivre.com.br/celulares-smartphones#deal_print_id=&pricing_filter=yes",
+    "💻 Informática":       "https://lista.mercadolivre.com.br/computadores#deal_print_id=&pricing_filter=yes",
+    "🎮 Games":             "https://lista.mercadolivre.com.br/video-games#deal_print_id=&pricing_filter=yes",
+    "🏠 Casa e Jardim":     "https://lista.mercadolivre.com.br/casa-moveis-decoracao#deal_print_id=&pricing_filter=yes",
+    "⚡ Eletrodomésticos":  "https://lista.mercadolivre.com.br/eletrodomesticos#deal_print_id=&pricing_filter=yes",
+    "🎽 Esporte e Fitness": "https://lista.mercadolivre.com.br/esportes-fitness#deal_print_id=&pricing_filter=yes",
+    "🧴 Beleza e Saúde":    "https://lista.mercadolivre.com.br/beleza-cuidado-pessoal#deal_print_id=&pricing_filter=yes",
+    "🔥 Mais Vendidos":     "https://www.mercadolivre.com.br/ofertas",
+    "📦 Ofertas do Dia":    "https://www.mercadolivre.com.br/ofertas#nav-by-cat",
+}
 
 def gerar_link_afiliado(url_produto: str) -> str:
     params = {k: v for k, v in ML_AFILIADO_PARAMS.items() if v}
     separador = "&" if "?" in url_produto else "?"
     return f"{url_produto}{separador}{urllib.parse.urlencode(params)}"
-
-# ─── Cupom ───────────────────────────────────────────────────
-
-def buscar_cupom_produto(produto_id: str, sessao: requests.Session) -> str | None:
-    try:
-        resp = sessao.get(f"{BASE_URL}/items/{produto_id}/coupons", timeout=10)
-        if resp.status_code == 200:
-            dados = resp.json()
-            cupons = dados if isinstance(dados, list) else dados.get("coupons", [])
-            for c in cupons:
-                codigo = c.get("code") or c.get("id", "")
-                if codigo:
-                    return codigo.upper()
-    except Exception:
-        pass
-    return None
 
 def detectar_cupom_por_categoria(nome: str) -> str | None:
     nome_lower = nome.lower()
@@ -128,95 +72,192 @@ def detectar_cupom_por_categoria(nome: str) -> str | None:
             return cupom
     return None
 
-# ─── Buscar por categoria ────────────────────────────────────
+# ─── Buscar via JSON embutido na página ─────────────────────
 
-def buscar_produtos_categoria(nome: str, id_cat: str, sessao: requests.Session) -> list:
+def buscar_produtos_categoria(nome: str, url: str) -> list:
     encontrados = []
-    try:
-        resp = sessao.get(
-            f"{BASE_URL}/sites/MLB/search",
-            params={"category": id_cat, "sort": "best_seller", "limit": 50},
-            timeout=20,
-        )
+    sessao = requests.Session()
+    sessao.headers.update(HEADERS)
 
-        # Se 403, tenta busca por termo
-        if resp.status_code == 403:
-            log.warning(f"[{nome}] 403 na categoria, tentando por termo...")
-            termo = nome.encode("ascii", "ignore").decode().strip()
-            resp = sessao.get(
-                f"{BASE_URL}/sites/MLB/search",
-                params={"q": termo, "sort": "best_seller", "limit": 50},
-                timeout=20,
-            )
+    try:
+        resp = sessao.get(url, timeout=25)
+        log.info(f"[{nome}] HTTP {resp.status_code}")
 
         if resp.status_code != 200:
-            log.error(f"[{nome}] HTTP {resp.status_code}")
+            log.error(f"[{nome}] Falha ao acessar página")
             return []
 
-        resultados = resp.json().get("results", [])
-        log.info(f"[{nome}] {len(resultados)} produtos na API")
+        html = resp.text
 
-        for item in resultados:
-            p = _extrair_produto(item, nome, sessao)
-            if p:
-                encontrados.append(p)
-            if len(encontrados) >= MAX_PRODUTOS_POR_CATEGORIA:
-                break
+        # Tenta extrair JSON de dados de produto do HTML
+        padrao = re.compile(
+            r'"price"\s*:\s*([\d.]+).*?"original_price"\s*:\s*([\d.]+).*?"title"\s*:\s*"([^"]+)".*?"permalink"\s*:\s*"([^"]+)".*?"thumbnail"\s*:\s*"([^"]+)"',
+            re.DOTALL
+        )
+        matches = padrao.findall(html)
 
-        time.sleep(1)
+        if not matches:
+            # Tenta padrão alternativo
+            padrao2 = re.compile(r'__PRELOADED_STATE__\s*=\s*({.*?});</script>', re.DOTALL)
+            m = padrao2.search(html)
+            if m:
+                try:
+                    dados = json.loads(m.group(1))
+                    items = _extrair_de_preloaded(dados, nome)
+                    encontrados.extend(items)
+                except Exception:
+                    pass
+
+        for match in matches:
+            try:
+                preco         = float(match[0])
+                preco_orig    = float(match[1])
+                titulo        = match[2]
+                permalink     = match[3]
+                thumbnail     = match[4]
+
+                if preco_orig <= preco:
+                    continue
+                desconto = round(((preco_orig - preco) / preco_orig) * 100)
+                if desconto < DESCONTO_MINIMO_PERCENT:
+                    continue
+                if preco < PRECO_MINIMO or preco > PRECO_MAXIMO:
+                    continue
+
+                pid = permalink.split("/p/")[-1].split("?")[0] if "/p/" in permalink else permalink.split("-")[-1].split(".")[0]
+
+                encontrados.append({
+                    "id":             pid,
+                    "titulo":         titulo,
+                    "preco":          preco,
+                    "preco_original": preco_orig,
+                    "desconto":       desconto,
+                    "economia":       preco_orig - preco,
+                    "link":           gerar_link_afiliado(permalink),
+                    "imagem":         thumbnail,
+                    "rating":         0,
+                    "total_reviews":  0,
+                    "categoria":      nome,
+                    "cupom":          detectar_cupom_por_categoria(nome),
+                })
+
+                if len(encontrados) >= MAX_PRODUTOS_POR_CATEGORIA:
+                    break
+
+            except Exception:
+                continue
+
+        # Se nada foi encontrado via regex, usa API pública sem autenticação
+        if not encontrados:
+            encontrados = _buscar_api_publica(nome)
+
+        time.sleep(2)
 
     except Exception as e:
         log.error(f"[{nome}] Erro: {e}")
+        encontrados = _buscar_api_publica(nome)
 
     log.info(f"[{nome}] {len(encontrados)} aprovados")
     return encontrados
 
-# ─── Extrair produto ─────────────────────────────────────────
-
-def _extrair_produto(item: dict, categoria: str, sessao: requests.Session) -> dict | None:
+def _extrair_de_preloaded(dados: dict, nome: str) -> list:
+    encontrados = []
     try:
-        pid           = item.get("id", "")
-        titulo        = item.get("title", "")
-        preco         = float(item.get("price", 0))
-        preco_orig    = float(item.get("original_price") or 0)
-        permalink     = item.get("permalink", "")
-        thumbnail     = item.get("thumbnail", "").replace("I.jpg", "O.jpg")
-        avs           = item.get("reviews", {})
-        rating        = avs.get("rating_average", 0)
-        total_reviews = avs.get("total", 0)
+        items = dados.get("initialState", {}).get("results", [])
+        for item in items:
+            preco      = float(item.get("price", 0))
+            preco_orig = float(item.get("original_price") or 0)
+            if not preco_orig or preco_orig <= preco:
+                continue
+            desconto = round(((preco_orig - preco) / preco_orig) * 100)
+            if desconto < DESCONTO_MINIMO_PERCENT:
+                continue
+            if preco < PRECO_MINIMO or preco > PRECO_MAXIMO:
+                continue
+            encontrados.append({
+                "id":             item.get("id", ""),
+                "titulo":         item.get("title", ""),
+                "preco":          preco,
+                "preco_original": preco_orig,
+                "desconto":       desconto,
+                "economia":       preco_orig - preco,
+                "link":           gerar_link_afiliado(item.get("permalink", "")),
+                "imagem":         item.get("thumbnail", ""),
+                "rating":         0,
+                "total_reviews":  0,
+                "categoria":      nome,
+                "cupom":          detectar_cupom_por_categoria(nome),
+            })
+    except Exception:
+        pass
+    return encontrados
 
-        if not preco_orig or preco_orig <= preco:
-            return None
-        desconto = round(((preco_orig - preco) / preco_orig) * 100)
-        if desconto < DESCONTO_MINIMO_PERCENT:
-            return None
-        if preco < PRECO_MINIMO or preco > PRECO_MAXIMO:
-            return None
-        if not thumbnail:
-            return None
+# ─── Fallback: API pública sem token ────────────────────────
 
-        cupom = buscar_cupom_produto(pid, sessao) or detectar_cupom_por_categoria(categoria)
-
-        return {
-            "id": pid, "titulo": titulo, "preco": preco,
-            "preco_original": preco_orig, "desconto": desconto,
-            "economia": preco_orig - preco, "link": gerar_link_afiliado(permalink),
-            "imagem": thumbnail, "rating": rating,
-            "total_reviews": total_reviews, "categoria": categoria, "cupom": cupom,
+def _buscar_api_publica(nome: str) -> list:
+    """Tenta a API pública com query de texto — último recurso."""
+    encontrados = []
+    try:
+        termos = {
+            "💊 Suplementos": "suplemento proteina",
+            "👗 Moda Feminina": "vestido feminino",
+            "👔 Moda Masculina": "camisa masculina",
+            "📱 Smartphones": "smartphone samsung",
+            "💻 Informática": "notebook",
+            "🎮 Games": "jogo ps5",
+            "🏠 Casa e Jardim": "organizador casa",
+            "⚡ Eletrodomésticos": "air fryer",
+            "🎽 Esporte e Fitness": "tenis corrida",
+            "🧴 Beleza e Saúde": "perfume importado",
+            "🔥 Mais Vendidos": "mais vendidos",
+            "📦 Ofertas do Dia": "oferta do dia",
         }
+        termo = termos.get(nome, nome.replace("📦","").replace("🔥","").strip())
+        url = f"https://api.mercadolibre.com/sites/MLB/search"
+        params = {"q": termo, "sort": "best_seller", "limit": 50}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "application/json",
+        }
+        resp = requests.get(url, params=params, headers=headers, timeout=20)
+        if resp.status_code == 200:
+            for item in resp.json().get("results", []):
+                preco      = float(item.get("price", 0))
+                preco_orig = float(item.get("original_price") or 0)
+                if not preco_orig or preco_orig <= preco:
+                    continue
+                desconto = round(((preco_orig - preco) / preco_orig) * 100)
+                if desconto < DESCONTO_MINIMO_PERCENT:
+                    continue
+                if preco < PRECO_MINIMO or preco > PRECO_MAXIMO:
+                    continue
+                encontrados.append({
+                    "id":             item.get("id", ""),
+                    "titulo":         item.get("title", ""),
+                    "preco":          preco,
+                    "preco_original": preco_orig,
+                    "desconto":       desconto,
+                    "economia":       preco_orig - preco,
+                    "link":           gerar_link_afiliado(item.get("permalink", "")),
+                    "imagem":         item.get("thumbnail", "").replace("I.jpg","O.jpg"),
+                    "rating":         item.get("reviews", {}).get("rating_average", 0),
+                    "total_reviews":  item.get("reviews", {}).get("total", 0),
+                    "categoria":      nome,
+                    "cupom":          detectar_cupom_por_categoria(nome),
+                })
+                if len(encontrados) >= MAX_PRODUTOS_POR_CATEGORIA:
+                    break
     except Exception as e:
-        log.warning(f"Erro produto {item.get('id','?')}: {e}")
-        return None
+        log.error(f"[{nome}] API pública também falhou: {e}")
+    return encontrados
 
 # ─── Todas as categorias ─────────────────────────────────────
 
 def buscar_todas_categorias() -> list:
     todos = []
-    ativas = {n: d for n, d in CATEGORIAS.items() if d.get("ativo")}
-    log.info(f"Buscando em {len(ativas)} categorias...")
-    sessao = criar_sessao()
-    for nome, dados in ativas.items():
-        todos.extend(buscar_produtos_categoria(nome, dados["id"], sessao))
+    log.info(f"Buscando em {len(URLS_CATEGORIAS)} categorias...")
+    for nome, url in URLS_CATEGORIAS.items():
+        todos.extend(buscar_produtos_categoria(nome, url))
     log.info(f"Total para enviar: {len(todos)} produtos")
     return todos
 
