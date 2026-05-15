@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════
-#  ml_scraper.py — v7 com tag=best_price e filtros ampliados
+#  ml_scraper.py — v8 com diagnóstico detalhado
 # ═══════════════════════════════════════════════════════════
 
 import requests
@@ -41,18 +41,18 @@ CUPONS_MANUAIS = {
 }
 
 BUSCAS = {
-    "💊 Suplementos":       ["whey protein", "creatina monohidratada", "bcaa aminoacido"],
-    "👗 Moda Feminina":     ["vestido feminino", "conjunto feminino", "blusa feminina"],
-    "👔 Moda Masculina":    ["camiseta masculina", "kit camisetas", "camisa masculina"],
-    "📱 Smartphones":       ["smartphone samsung galaxy", "celular xiaomi", "iphone usado"],
-    "💻 Informática":       ["notebook i5", "monitor led", "ssd 1tb"],
-    "🎮 Games":             ["controle sem fio", "headset gamer", "cadeira gamer"],
-    "🏠 Casa e Jardim":     ["jogo de panelas", "jogo de cama casal", "organizador guarda roupa"],
-    "⚡ Eletrodomésticos":  ["air fryer digital", "fritadeira elétrica", "aspirador vertical"],
-    "🎽 Esporte e Fitness": ["tênis esportivo", "kit halteres", "colchonete yoga"],
-    "🧴 Beleza e Saúde":    ["perfume importado", "kit skincare", "protetor solar facial"],
-    "🔥 Mais Vendidos":     ["kit presente", "fone bluetooth", "relogio smartwatch"],
-    "📦 Ofertas do Dia":    ["ventilador turbo", "caixa de som bluetooth", "carregador rapido"],
+    "💊 Suplementos":       ["whey protein", "creatina"],
+    "👗 Moda Feminina":     ["vestido feminino", "blusa feminina"],
+    "👔 Moda Masculina":    ["camiseta masculina", "camisa masculina"],
+    "📱 Smartphones":       ["smartphone samsung", "celular xiaomi"],
+    "💻 Informática":       ["notebook", "ssd"],
+    "🎮 Games":             ["headset gamer", "controle ps5"],
+    "🏠 Casa e Jardim":     ["jogo de panelas", "jogo de cama"],
+    "⚡ Eletrodomésticos":  ["air fryer", "aspirador"],
+    "🎽 Esporte e Fitness": ["tenis esportivo", "halteres"],
+    "🧴 Beleza e Saúde":    ["perfume importado", "protetor solar"],
+    "🔥 Mais Vendidos":     ["fone bluetooth", "smartwatch"],
+    "📦 Ofertas do Dia":    ["caixa de som", "carregador rapido"],
 }
 
 def gerar_link_afiliado(url: str) -> str:
@@ -73,6 +73,7 @@ def _extrair_produto(item: dict, categoria: str) -> dict | None:
         pid       = item.get("id", "")
         titulo    = item.get("title", "")
         preco     = float(item.get("price", 0))
+        preco_orig = float(item.get("original_price") or 0)
         permalink = item.get("permalink", "")
         thumb     = item.get("thumbnail", "").replace("I.jpg", "O.jpg").replace("http://", "https://")
         avs       = item.get("reviews", {}) or {}
@@ -81,47 +82,6 @@ def _extrair_produto(item: dict, categoria: str) -> dict | None:
             return None
         if preco < PRECO_MINIMO or preco > PRECO_MAXIMO:
             return None
-
-        # ── Tentar obter preço original de várias fontes ──────
-        preco_orig = 0.0
-
-        # Fonte 1: original_price direto
-        if item.get("original_price"):
-            preco_orig = float(item["original_price"])
-
-        # Fonte 2: sale_price
-        if not preco_orig and item.get("sale_price"):
-            sp = item["sale_price"]
-            if isinstance(sp, dict) and sp.get("price_id"):
-                preco_orig = preco  # será tratado abaixo
-
-        # Fonte 3: discount_percentage no atributo
-        desconto_direto = 0
-        attrs = item.get("attributes", [])
-        for attr in attrs:
-            if attr.get("id") == "DISCOUNT_PERCENTAGE":
-                try:
-                    desconto_direto = int(float(attr.get("value_name", "0").replace("%", "")))
-                except Exception:
-                    pass
-
-        # Fonte 4: calcular pela diferença de preço com desconto
-        if not preco_orig and desconto_direto >= DESCONTO_MINIMO_PERCENT:
-            preco_orig = round(preco / (1 - desconto_direto / 100), 2)
-
-        # Fonte 5: campo prices
-        if not preco_orig:
-            prices = item.get("prices", {})
-            if isinstance(prices, dict):
-                for p_item in prices.get("prices", []):
-                    conditions = p_item.get("conditions", {})
-                    if conditions.get("context") == "DISCOUNT":
-                        reg = p_item.get("regular_amount")
-                        if reg:
-                            preco_orig = float(reg)
-                            break
-
-        # Se ainda não tem preço original, ignora
         if not preco_orig or preco_orig <= preco:
             return None
 
@@ -144,31 +104,35 @@ def _extrair_produto(item: dict, categoria: str) -> dict | None:
             "cupom":          detectar_cupom(categoria),
         }
     except Exception as e:
-        log.debug(f"Erro extraindo produto: {e}")
+        log.debug(f"Erro extraindo: {e}")
         return None
 
 def buscar_por_termo(termo: str, categoria: str) -> list:
     encontrados = []
     try:
-        # tag=best_price filtra só produtos com desconto real
         resp = requests.get(
             f"{BASE}/sites/MLB/search",
-            params={
-                "q":    termo,
-                "sort": "best_seller",
-                "limit": 50,
-                "tag":  "best_price",
-            },
+            params={"q": termo, "sort": "best_seller", "limit": 50},
             headers=HEADERS,
             timeout=20,
         )
 
         if resp.status_code != 200:
-            log.debug(f"  [{termo}] HTTP {resp.status_code}")
+            log.warning(f"  [{termo}] HTTP {resp.status_code}")
             return []
 
         resultados = resp.json().get("results", [])
-        log.debug(f"  [{termo}] {len(resultados)} itens retornados")
+
+        # ── Diagnóstico: inspecionar primeiros 3 itens ──────
+        com_preco_orig = sum(1 for r in resultados if r.get("original_price"))
+        log.info(f"  [{termo}] {len(resultados)} itens | {com_preco_orig} com original_price")
+
+        if resultados and com_preco_orig == 0:
+            # Mostra campos do primeiro item para diagnóstico
+            primeiro = resultados[0]
+            campos = {k: v for k, v in primeiro.items()
+                      if k in ("price","original_price","sale_price","discount","prices","tags")}
+            log.info(f"  Campos do 1º item: {campos}")
 
         for item in resultados:
             p = _extrair_produto(item, categoria)
@@ -185,16 +149,14 @@ def buscar_por_termo(termo: str, categoria: str) -> list:
 def buscar_produtos_categoria(nome: str, termos: list) -> list:
     todos = []
     ids_vistos = set()
-
     for termo in termos:
         for p in buscar_por_termo(termo, nome):
             if p["id"] not in ids_vistos:
                 ids_vistos.add(p["id"])
                 todos.append(p)
-        time.sleep(1.5)
+        time.sleep(1)
         if len(todos) >= MAX_PRODUTOS_POR_CATEGORIA:
             break
-
     log.info(f"[{nome}] {len(todos)} aprovados")
     return todos[:MAX_PRODUTOS_POR_CATEGORIA]
 
