@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════
-#  ml_scraper.py — v6 API de texto (sem auth, confiável)
+#  ml_scraper.py — v7 com tag=best_price e filtros ampliados
 # ═══════════════════════════════════════════════════════════
 
 import requests
@@ -21,10 +21,9 @@ log = logging.getLogger(__name__)
 BASE = "https://api.mercadolibre.com"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; bot-promocoes/1.0)",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept": "application/json",
     "Accept-Language": "pt-BR,pt;q=0.9",
-    "x-platform": "MP",
 }
 
 CUPONS_MANUAIS = {
@@ -41,20 +40,19 @@ CUPONS_MANUAIS = {
     "casa":           "CASAML",
 }
 
-# ─── Termos de busca por categoria ──────────────────────────
 BUSCAS = {
-    "💊 Suplementos":       ["whey protein", "creatina", "suplemento vitamina"],
-    "👗 Moda Feminina":     ["vestido feminino", "blusa feminina", "calça feminina"],
-    "👔 Moda Masculina":    ["camiseta masculina", "calça jeans masculina", "camisa social"],
-    "📱 Smartphones":       ["smartphone samsung", "iphone", "celular xiaomi"],
-    "💻 Informática":       ["notebook", "monitor gamer", "teclado mecânico"],
-    "🎮 Games":             ["controle ps5", "jogo xbox", "headset gamer"],
-    "🏠 Casa e Jardim":     ["organizador casa", "jogo de cama", "panela"],
-    "⚡ Eletrodomésticos":  ["air fryer", "aspirador pó", "liquidificador"],
-    "🎽 Esporte e Fitness": ["tênis corrida", "legging academia", "halteres"],
-    "🧴 Beleza e Saúde":    ["perfume feminino", "hidratante corporal", "protetor solar"],
-    "🔥 Mais Vendidos":     ["mais vendido promoção", "oferta relâmpago"],
-    "📦 Ofertas do Dia":    ["oferta do dia", "desconto especial"],
+    "💊 Suplementos":       ["whey protein", "creatina monohidratada", "bcaa aminoacido"],
+    "👗 Moda Feminina":     ["vestido feminino", "conjunto feminino", "blusa feminina"],
+    "👔 Moda Masculina":    ["camiseta masculina", "kit camisetas", "camisa masculina"],
+    "📱 Smartphones":       ["smartphone samsung galaxy", "celular xiaomi", "iphone usado"],
+    "💻 Informática":       ["notebook i5", "monitor led", "ssd 1tb"],
+    "🎮 Games":             ["controle sem fio", "headset gamer", "cadeira gamer"],
+    "🏠 Casa e Jardim":     ["jogo de panelas", "jogo de cama casal", "organizador guarda roupa"],
+    "⚡ Eletrodomésticos":  ["air fryer digital", "fritadeira elétrica", "aspirador vertical"],
+    "🎽 Esporte e Fitness": ["tênis esportivo", "kit halteres", "colchonete yoga"],
+    "🧴 Beleza e Saúde":    ["perfume importado", "kit skincare", "protetor solar facial"],
+    "🔥 Mais Vendidos":     ["kit presente", "fone bluetooth", "relogio smartwatch"],
+    "📦 Ofertas do Dia":    ["ventilador turbo", "caixa de som bluetooth", "carregador rapido"],
 }
 
 def gerar_link_afiliado(url: str) -> str:
@@ -72,30 +70,73 @@ def detectar_cupom(nome: str) -> str | None:
 
 def _extrair_produto(item: dict, categoria: str) -> dict | None:
     try:
-        preco      = float(item.get("price", 0))
-        preco_orig = float(item.get("original_price") or 0)
+        pid       = item.get("id", "")
+        titulo    = item.get("title", "")
+        preco     = float(item.get("price", 0))
+        permalink = item.get("permalink", "")
+        thumb     = item.get("thumbnail", "").replace("I.jpg", "O.jpg").replace("http://", "https://")
+        avs       = item.get("reviews", {}) or {}
 
-        if not preco_orig or preco_orig <= preco:
-            return None
-        desconto = round(((preco_orig - preco) / preco_orig) * 100)
-        if desconto < DESCONTO_MINIMO_PERCENT:
+        if preco <= 0 or not permalink:
             return None
         if preco < PRECO_MINIMO or preco > PRECO_MAXIMO:
             return None
 
-        thumb = item.get("thumbnail", "")
-        thumb = thumb.replace("I.jpg", "O.jpg").replace("http://", "https://")
+        # ── Tentar obter preço original de várias fontes ──────
+        preco_orig = 0.0
 
-        avs = item.get("reviews", {}) or {}
+        # Fonte 1: original_price direto
+        if item.get("original_price"):
+            preco_orig = float(item["original_price"])
+
+        # Fonte 2: sale_price
+        if not preco_orig and item.get("sale_price"):
+            sp = item["sale_price"]
+            if isinstance(sp, dict) and sp.get("price_id"):
+                preco_orig = preco  # será tratado abaixo
+
+        # Fonte 3: discount_percentage no atributo
+        desconto_direto = 0
+        attrs = item.get("attributes", [])
+        for attr in attrs:
+            if attr.get("id") == "DISCOUNT_PERCENTAGE":
+                try:
+                    desconto_direto = int(float(attr.get("value_name", "0").replace("%", "")))
+                except Exception:
+                    pass
+
+        # Fonte 4: calcular pela diferença de preço com desconto
+        if not preco_orig and desconto_direto >= DESCONTO_MINIMO_PERCENT:
+            preco_orig = round(preco / (1 - desconto_direto / 100), 2)
+
+        # Fonte 5: campo prices
+        if not preco_orig:
+            prices = item.get("prices", {})
+            if isinstance(prices, dict):
+                for p_item in prices.get("prices", []):
+                    conditions = p_item.get("conditions", {})
+                    if conditions.get("context") == "DISCOUNT":
+                        reg = p_item.get("regular_amount")
+                        if reg:
+                            preco_orig = float(reg)
+                            break
+
+        # Se ainda não tem preço original, ignora
+        if not preco_orig or preco_orig <= preco:
+            return None
+
+        desconto = round(((preco_orig - preco) / preco_orig) * 100)
+        if desconto < DESCONTO_MINIMO_PERCENT:
+            return None
 
         return {
-            "id":             item.get("id", ""),
-            "titulo":         item.get("title", ""),
+            "id":             pid,
+            "titulo":         titulo,
             "preco":          preco,
             "preco_original": preco_orig,
             "desconto":       desconto,
             "economia":       round(preco_orig - preco, 2),
-            "link":           gerar_link_afiliado(item.get("permalink", "")),
+            "link":           gerar_link_afiliado(permalink),
             "imagem":         thumb,
             "rating":         avs.get("rating_average", 0),
             "total_reviews":  avs.get("total", 0),
@@ -109,18 +150,27 @@ def _extrair_produto(item: dict, categoria: str) -> dict | None:
 def buscar_por_termo(termo: str, categoria: str) -> list:
     encontrados = []
     try:
+        # tag=best_price filtra só produtos com desconto real
         resp = requests.get(
             f"{BASE}/sites/MLB/search",
-            params={"q": termo, "sort": "best_seller", "limit": 50},
+            params={
+                "q":    termo,
+                "sort": "best_seller",
+                "limit": 50,
+                "tag":  "best_price",
+            },
             headers=HEADERS,
             timeout=20,
         )
-        log.debug(f"  [{termo}] HTTP {resp.status_code}")
 
         if resp.status_code != 200:
+            log.debug(f"  [{termo}] HTTP {resp.status_code}")
             return []
 
-        for item in resp.json().get("results", []):
+        resultados = resp.json().get("results", [])
+        log.debug(f"  [{termo}] {len(resultados)} itens retornados")
+
+        for item in resultados:
             p = _extrair_produto(item, categoria)
             if p:
                 encontrados.append(p)
@@ -137,12 +187,11 @@ def buscar_produtos_categoria(nome: str, termos: list) -> list:
     ids_vistos = set()
 
     for termo in termos:
-        produtos = buscar_por_termo(termo, nome)
-        for p in produtos:
+        for p in buscar_por_termo(termo, nome):
             if p["id"] not in ids_vistos:
                 ids_vistos.add(p["id"])
                 todos.append(p)
-        time.sleep(1)
+        time.sleep(1.5)
         if len(todos) >= MAX_PRODUTOS_POR_CATEGORIA:
             break
 
