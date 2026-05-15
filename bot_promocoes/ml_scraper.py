@@ -102,7 +102,7 @@ def buscar_produtos_categoria(nome: str, url: str) -> list:
         if resp.status_code != 200:
             return []
 
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(resp.text, "html.parser")
 
         # ── Seletores para página de lista (lista.mercadolivre.com.br)
         items = soup.select("li.ui-search-layout__item")
