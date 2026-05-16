@@ -19,7 +19,7 @@ jobs:
           python-version: '3.11'
 
       - name: Instalar dependências
-        run: pip install -r requirements.txt
+        run: pip install -r bot_promocoes/requirements.txt
 
       - name: Rodar o bot
         env:
@@ -28,4 +28,4 @@ jobs:
           ML_AFILIADO_ID:   ${{ secrets.ML_AFILIADO_ID }}
           ML_APP_ID:        ${{ secrets.ML_APP_ID }}
           ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
-        run: python main_once.py
+        run: python bot_promocoes/main_once.py
