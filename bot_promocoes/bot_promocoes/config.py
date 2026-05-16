@@ -63,7 +63,7 @@ MAX_PRODUTOS_POR_CATEGORIA = 3 # quantos produtos postar por categoria por ciclo
 
 # ─── AGENDAMENTO ────────────────────────────────────────────
 INTERVALO_MINUTOS = 120        # buscar novas promoções a cada 2 horas
-HORARIO_INICIO = 7             # hora do dia para começar (7h)
+HORARIO_INICIO = 0             # hora do dia para começar (7h)
 HORARIO_FIM = 23               # hora do dia para parar (23h)
 
 # ─── APARÊNCIA DAS MENSAGENS ─────────────────────────────────
