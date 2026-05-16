@@ -1,0 +1,31 @@
+name: Bot Promoções ML
+
+on:
+  schedule:
+    - cron: '0 10,12,14,16,18,20,22 * * *'  # Roda às 7h, 9h, 11h, 13h, 15h, 17h, 19h (horário BR = UTC-3)
+  workflow_dispatch:  # Permite rodar manualmente pelo GitHub
+
+jobs:
+  rodar-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: pip install -r bot_promocoes/requirements.txt
+
+      - name: Rodar o bot
+        env:
+          TELEGRAM_TOKEN:    ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CANAL:    ${{ secrets.TELEGRAM_CANAL }}
+          ML_AFILIADO_ID:    ${{ secrets.ML_AFILIADO_ID }}
+          ML_APP_ID:         ${{ secrets.ML_APP_ID }}
+          ML_CLIENT_SECRET:  ${{ secrets.ML_CLIENT_SECRET }}
+        run: python bot_promocoes/main_once.py
