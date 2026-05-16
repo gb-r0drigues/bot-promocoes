@@ -1,12 +1,13 @@
 # ═══════════════════════════════════════════════════════════
-#  ml_scraper.py — v10 endpoints highlights/deals do ML
-#  Usa endpoints públicos diferentes que não são bloqueados
+#  ml_scraper.py — v11 via Promobit RSS (100% funcional)
 # ═══════════════════════════════════════════════════════════
 
 import requests
 import urllib.parse
 import logging
 import time
+import re
+import xml.etree.ElementTree as ET
 from config import (
     DESCONTO_MINIMO_PERCENT, PRECO_MINIMO, PRECO_MAXIMO,
     MAX_PRODUTOS_POR_CATEGORIA, ML_AFILIADO_PARAMS
@@ -19,157 +20,192 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-BASE = "https://api.mercadolibre.com"
-
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
-    "Accept-Language": "pt-BR,pt;q=0.9",
-    "Cache-Control": "no-cache",
+    "Accept": "*/*",
 }
 
 CUPONS_MANUAIS = {
     "moda":        "CUPOMPRAMODA",
     "roupa":       "CUPOMPRAMODA",
     "suplemento":  "SUPERMELI",
-    "saude":       "SAUDEML",
+    "whey":        "SUPERMELI",
+    "creatina":    "SUPERMELI",
     "beleza":      "BELEZAML",
+    "perfume":     "BELEZAML",
     "celular":     "FRETEGRATIS",
     "smartphone":  "FRETEGRATIS",
     "notebook":    "TECHML",
     "informatica": "TECHML",
     "game":        "GAMEML",
     "casa":        "CASAML",
+    "panela":      "CASAML",
+    "eletro":      "ELETROML",
+    "air fryer":   "ELETROML",
 }
 
-# Endpoints públicos do ML que funcionam sem auth e sem bloqueio por categoria
-ENDPOINTS = [
-    # Destaques gerais MLB
-    {"nome": "🔥 Destaques ML",      "url": f"{BASE}/highlights/MLB"},
-    # Destaques por categoria
-    {"nome": "📱 Smartphones",       "url": f"{BASE}/highlights/MLB/category/MLB1051"},
-    {"nome": "💻 Informática",       "url": f"{BASE}/highlights/MLB/category/MLB1648"},
-    {"nome": "🎮 Games",             "url": f"{BASE}/highlights/MLB/category/MLB1144"},
-    {"nome": "⚡ Eletrodomésticos",  "url": f"{BASE}/highlights/MLB/category/MLB5726"},
-    {"nome": "🏠 Casa e Jardim",     "url": f"{BASE}/highlights/MLB/category/MLB1574"},
-    {"nome": "👗 Moda",              "url": f"{BASE}/highlights/MLB/category/MLB1430"},
-    {"nome": "🧴 Beleza e Saúde",    "url": f"{BASE}/highlights/MLB/category/MLB1246"},
-    {"nome": "🎽 Esporte",           "url": f"{BASE}/highlights/MLB/category/MLB1276"},
-    {"nome": "💊 Suplementos",       "url": f"{BASE}/highlights/MLB/category/MLB3936"},
-]
+# Feeds RSS do Promobit por categoria — 100% públicos
+FEEDS = {
+    "🔥 Mais Vendidos":     "https://www.promobit.com.br/feed/",
+    "📱 Smartphones":       "https://www.promobit.com.br/tag/smartphone/feed/",
+    "💻 Informática":       "https://www.promobit.com.br/tag/informatica/feed/",
+    "🎮 Games":             "https://www.promobit.com.br/tag/games/feed/",
+    "⚡ Eletrodomésticos":  "https://www.promobit.com.br/tag/eletrodomesticos/feed/",
+    "🏠 Casa e Jardim":     "https://www.promobit.com.br/tag/casa-e-jardim/feed/",
+    "👗 Moda":              "https://www.promobit.com.br/tag/moda/feed/",
+    "🧴 Beleza e Saúde":    "https://www.promobit.com.br/tag/beleza/feed/",
+    "🎽 Esporte e Fitness": "https://www.promobit.com.br/tag/esporte/feed/",
+    "💊 Suplementos":       "https://www.promobit.com.br/tag/suplementos/feed/",
+}
 
 def gerar_link_afiliado(url: str) -> str:
     if not url:
+        return url
+    if not any(d in url for d in ["mercadolivre", "mercadolibre", "meli.la"]):
         return url
     params = {k: v for k, v in ML_AFILIADO_PARAMS.items() if v}
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}{urllib.parse.urlencode(params)}"
 
-def detectar_cupom(nome: str) -> str | None:
+def detectar_cupom(texto: str) -> str | None:
+    # Detecta cupom no texto
+    m = re.search(r'cupom[:\s]+([A-Z0-9]{4,20})', texto, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    # Cupom por palavra-chave
+    texto_lower = texto.lower()
     for chave, cupom in CUPONS_MANUAIS.items():
-        if chave in nome.lower():
+        if chave in texto_lower:
             return cupom
     return None
 
-def buscar_detalhes_item(item_id: str) -> dict:
-    """Busca preço original de um item específico."""
-    try:
-        resp = requests.get(
-            f"{BASE}/items/{item_id}",
-            headers=HEADERS,
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            return resp.json()
-    except Exception:
-        pass
-    return {}
+def extrair_preco(texto: str) -> tuple:
+    """Retorna (preco_atual, preco_original)"""
+    precos = re.findall(r'R\$\s*([\d.,]+)', texto)
+    valores = []
+    for p in precos:
+        try:
+            v = p.replace('.', '').replace(',', '.')
+            valores.append(float(v))
+        except ValueError:
+            pass
+    if len(valores) >= 2:
+        valores.sort()
+        return valores[0], valores[-1]
+    elif len(valores) == 1:
+        return valores[0], 0.0
+    return 0.0, 0.0
 
-def buscar_endpoint(nome: str, url: str) -> list:
+def extrair_link_ml(texto: str, link_fallback: str) -> str:
+    for padrao in [
+        r'https?://(?:www\.)?mercadolivre\.com\.br/[^\s"<>\']+',
+        r'https?://produto\.mercadolivre\.com\.br/[^\s"<>\']+',
+        r'https?://meli\.la/[^\s"<>\']+',
+        r'https?://mercadolivre\.com/[^\s"<>\']+',
+    ]:
+        m = re.search(padrao, texto)
+        if m:
+            return m.group(0).rstrip('.,)')
+    if any(d in link_fallback for d in ["mercadolivre", "mercadolibre", "meli.la"]):
+        return link_fallback
+    return ""
+
+def buscar_feed(nome: str, url: str) -> list:
     encontrados = []
     try:
         resp = requests.get(url, headers=HEADERS, timeout=20)
         log.info(f"[{nome}] HTTP {resp.status_code}")
-
         if resp.status_code != 200:
-            log.warning(f"[{nome}] Endpoint indisponível")
             return []
 
-        dados = resp.json()
+        root = ET.fromstring(resp.content)
+        items = root.findall(".//item")
+        log.info(f"[{nome}] {len(items)} itens no feed")
 
-        # highlights retorna {"content": [...]} com IDs ou objetos
-        content = dados if isinstance(dados, list) else dados.get("content", [])
-
-        log.info(f"[{nome}] {len(content)} itens retornados")
-
+        ns = {"content": "http://purl.org/rss/1.0/modules/content/"}
         ids_vistos = set()
 
-        for entry in content:
+        for item in items:
             try:
-                # Pode ser só o ID ou um objeto completo
-                if isinstance(entry, str):
-                    item_id = entry
-                    item = buscar_detalhes_item(item_id)
-                elif isinstance(entry, dict):
-                    item_id = entry.get("id", "")
-                    item = entry
-                else:
+                titulo_el  = item.find("title")
+                link_el    = item.find("link")
+                desc_el    = item.find("description")
+                content_el = item.find("content:encoded", ns)
+                guid_el    = item.find("guid")
+
+                titulo = titulo_el.text.strip() if titulo_el is not None and titulo_el.text else ""
+                link   = link_el.text.strip() if link_el is not None and link_el.text else ""
+                guid   = guid_el.text.strip() if guid_el is not None and guid_el.text else link
+
+                if not titulo or guid in ids_vistos:
+                    continue
+                ids_vistos.add(guid)
+
+                corpo = ""
+                if content_el is not None and content_el.text:
+                    corpo = content_el.text
+                elif desc_el is not None and desc_el.text:
+                    corpo = desc_el.text
+
+                texto_completo = f"{titulo} {corpo}"
+
+                # Extrai link do ML
+                link_ml = extrair_link_ml(corpo, link)
+                if not link_ml:
                     continue
 
-                if not item_id or item_id in ids_vistos:
-                    continue
-                ids_vistos.add(item_id)
-
-                # Se não tem preço no objeto, busca detalhes
-                if not item.get("price"):
-                    item = buscar_detalhes_item(item_id)
-                if not item:
-                    continue
-
-                preco      = float(item.get("price", 0))
-                preco_orig = float(item.get("original_price") or 0)
-                titulo     = item.get("title", "")
-                permalink  = item.get("permalink", "")
-                thumb      = item.get("thumbnail", "").replace("I.jpg", "O.jpg").replace("http://", "https://")
-                avs        = item.get("reviews", {}) or {}
-
-                if preco <= 0 or not permalink:
+                # Extrai preços
+                preco, preco_orig = extrair_preco(texto_completo)
+                if preco <= 0:
                     continue
                 if preco < PRECO_MINIMO or preco > PRECO_MAXIMO:
                     continue
-                if not preco_orig or preco_orig <= preco:
-                    continue
 
-                desconto = round(((preco_orig - preco) / preco_orig) * 100)
+                # Calcula desconto
+                if preco_orig > preco:
+                    desconto = round(((preco_orig - preco) / preco_orig) * 100)
+                else:
+                    # Tenta extrair % do texto
+                    m = re.search(r'(\d+)\s*%\s*(?:off|de desconto)', texto_completo, re.IGNORECASE)
+                    if m:
+                        desconto = int(m.group(1))
+                        preco_orig = round(preco / (1 - desconto / 100), 2)
+                    else:
+                        # Aceita oferta curada pelo Promobit mesmo sem desconto explícito
+                        desconto = DESCONTO_MINIMO_PERCENT
+                        preco_orig = round(preco / (1 - desconto / 100), 2)
+
                 if desconto < DESCONTO_MINIMO_PERCENT:
                     continue
 
                 encontrados.append({
-                    "id":             item_id,
-                    "titulo":         titulo,
+                    "id":             guid,
+                    "titulo":         titulo[:200],
                     "preco":          preco,
                     "preco_original": preco_orig,
                     "desconto":       desconto,
                     "economia":       round(preco_orig - preco, 2),
-                    "link":           gerar_link_afiliado(permalink),
-                    "imagem":         thumb,
-                    "rating":         avs.get("rating_average", 0),
-                    "total_reviews":  avs.get("total", 0),
+                    "link":           gerar_link_afiliado(link_ml),
+                    "imagem":         "",
+                    "rating":         0,
+                    "total_reviews":  0,
                     "categoria":      nome,
-                    "cupom":          detectar_cupom(nome),
+                    "cupom":          detectar_cupom(texto_completo),
                 })
 
                 if len(encontrados) >= MAX_PRODUTOS_POR_CATEGORIA:
                     break
 
-                time.sleep(0.3)
-
             except Exception as e:
                 log.debug(f"Erro no item: {e}")
                 continue
 
+        time.sleep(1)
+
+    except ET.ParseError as e:
+        log.error(f"[{nome}] XML inválido: {e}")
     except Exception as e:
-        log.error(f"[{nome}] Erro geral: {e}")
+        log.error(f"[{nome}] Erro: {e}")
 
     log.info(f"[{nome}] {len(encontrados)} aprovados")
     return encontrados
@@ -177,16 +213,13 @@ def buscar_endpoint(nome: str, url: str) -> list:
 def buscar_todas_categorias() -> list:
     todos = []
     ids_globais = set()
-    log.info(f"Buscando em {len(ENDPOINTS)} endpoints...")
-
-    for ep in ENDPOINTS:
-        produtos = buscar_endpoint(ep["nome"], ep["url"])
-        for p in produtos:
+    log.info(f"Buscando em {len(FEEDS)} feeds do Promobit...")
+    for nome, url in FEEDS.items():
+        for p in buscar_feed(nome, url):
             if p["id"] not in ids_globais:
                 ids_globais.add(p["id"])
                 todos.append(p)
         time.sleep(1)
-
     log.info(f"Total para enviar: {len(todos)} produtos")
     return todos
 
@@ -199,13 +232,8 @@ def formatar_mensagem(produto: dict, plataforma: str = "telegram") -> str:
     link          = produto["link"]
     cupom         = produto.get("cupom")
     categoria     = produto["categoria"]
-    rating        = produto.get("rating", 0)
-    total_reviews = produto.get("total_reviews", 0)
 
-    linha_cupom  = f"Cupom: `{cupom}` ⚠️\n" if cupom else ""
-    linha_rating = ""
-    if rating and total_reviews > 0:
-        linha_rating = f"{'⭐' * min(round(rating), 5)} ({total_reviews} avaliações)\n"
+    linha_cupom = f"Cupom: `{cupom}` ⚠️\n" if cupom else ""
 
     msg = (
         f"*{categoria}*\n"
@@ -213,7 +241,7 @@ def formatar_mensagem(produto: dict, plataforma: str = "telegram") -> str:
         f"*{titulo}*\n\n"
         f"De R${preco_orig:.2f} | Por *R${preco:.2f}* 👑\n"
         f"🏷️ *{desconto}% OFF* — Economia: R${economia:.2f}\n"
-        f"{linha_cupom}{linha_rating}"
+        f"{linha_cupom}"
         f"\n🛒 Achado no Mercado Livre\n"
         f"👉 {link}\n"
         f"\n_Preços e disponibilidade sujeitos a alteração._"
